@@ -2252,6 +2252,16 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
+def _warn_duplicate_node_id(name, node_cls, module_path):
+    existing = NODE_CLASS_MAPPINGS.get(name)
+    if existing is not None and existing is not node_cls:
+        logging.warning(
+            f"Node ID '{name}' from {module_path} overrides an already registered node "
+            f"({getattr(existing, 'RELATIVE_PYTHON_MODULE', None) or 'built-in'}). "
+            "Two custom node packs define the same ID; the last loaded one wins."
+        )
+
+
 async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
     module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
@@ -2305,6 +2315,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
             for name, node_cls in module.NODE_CLASS_MAPPINGS.items():
                 if name not in ignore:
+                    _warn_duplicate_node_id(name, node_cls, module_path)
                     NODE_CLASS_MAPPINGS[name] = node_cls
                     node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
@@ -2335,6 +2346,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     node_cls: io.ComfyNode
                     schema = node_cls.GET_SCHEMA()
                     if schema.node_id not in ignore:
+                        _warn_duplicate_node_id(schema.node_id, node_cls, module_path)
                         NODE_CLASS_MAPPINGS[schema.node_id] = node_cls
                         node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
                         if schema.display_name is not None:
