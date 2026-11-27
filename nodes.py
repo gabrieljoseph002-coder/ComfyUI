@@ -2252,6 +2252,30 @@ def get_module_name(module_path: str) -> str:
     return base_path
 
 
+# module_path -> short reason, for custom node packs that failed to load this run
+CUSTOM_NODE_LOAD_FAILURES: dict[str, str] = {}
+
+
+def _record_load_failure(module_path: str, reason: str) -> bool:
+    CUSTOM_NODE_LOAD_FAILURES[module_path] = reason
+    return False
+
+
+def _pack_name(module_path: str) -> str:
+    name = os.path.basename(os.path.normpath(module_path))
+    return name[:-3] if name.endswith(".py") else name
+
+
+def custom_node_failure_summary(failures: dict[str, str]) -> list[str]:
+    """Lines summarizing failed custom node packs: pack name and reason."""
+    if not failures:
+        return []
+    lines = [f"{len(failures)} custom node pack(s) failed to load:"]
+    for module_path, reason in sorted(failures.items(), key=lambda kv: _pack_name(kv[0]).lower()):
+        lines.append(f"  {_pack_name(module_path)}: {reason}")
+    return lines
+
+
 async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
     module_name = get_module_name(module_path)
     if os.path.isfile(module_path):
@@ -2317,7 +2341,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
             entrypoint = getattr(module, "comfy_entrypoint")
             if not callable(entrypoint):
                 logging.warning(f"comfy_entrypoint in {module_path} is not callable, skipping.")
-                return False
+                return _record_load_failure(module_path, "comfy_entrypoint is not callable")
             try:
                 if inspect.iscoroutinefunction(entrypoint):
                     extension = await entrypoint()
@@ -2325,12 +2349,12 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                     extension = entrypoint()
                 if not isinstance(extension, ComfyExtension):
                     logging.warning(f"comfy_entrypoint in {module_path} did not return a ComfyExtension, skipping.")
-                    return False
+                    return _record_load_failure(module_path, "comfy_entrypoint did not return a ComfyExtension")
                 await extension.on_load()
                 node_list = await extension.get_node_list()
                 if not isinstance(node_list, list):
                     logging.warning(f"comfy_entrypoint in {module_path} did not return a list of nodes, skipping.")
-                    return False
+                    return _record_load_failure(module_path, "get_node_list did not return a list")
                 for node_cls in node_list:
                     node_cls: io.ComfyNode
                     schema = node_cls.GET_SCHEMA()
@@ -2342,14 +2366,14 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                 return True
             except Exception as e:
                 logging.warning(f"Error while calling comfy_entrypoint in {module_path}: {e}")
-                return False
+                return _record_load_failure(module_path, f"comfy_entrypoint raised {type(e).__name__}: {e}")
         else:
             logging.warning(f"Skip {module_path} module for custom nodes due to the lack of NODE_CLASS_MAPPINGS or comfy_entrypoint (need one).")
-            return False
+            return _record_load_failure(module_path, "no NODE_CLASS_MAPPINGS or comfy_entrypoint")
     except Exception as e:
         logging.warning(traceback.format_exc())
         logging.warning(f"Cannot import {module_path} module for custom nodes: {e}")
-        return False
+        return _record_load_failure(module_path, f"{type(e).__name__}: {e}")
 
 async def init_external_custom_nodes():
     """
@@ -2365,6 +2389,7 @@ async def init_external_custom_nodes():
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
     base_node_names = set(NODE_CLASS_MAPPINGS.keys())
+    CUSTOM_NODE_LOAD_FAILURES.clear()
     node_paths = folder_paths.get_folder_paths("custom_nodes")
     node_import_times = []
     for custom_node_path in node_paths:
@@ -2405,6 +2430,10 @@ async def init_external_custom_nodes():
                 import_message = " (IMPORT FAILED)"
             logging.info("{:6.1f} seconds{}: {}".format(n[0], import_message, n[1]))
         logging.info("")
+
+    failed = {path: CUSTOM_NODE_LOAD_FAILURES.get(path, "unknown error") for _, path, ok in node_import_times if not ok}
+    for line in custom_node_failure_summary(failed):
+        logging.warning(line)
 
 async def init_builtin_extra_nodes():
     """
